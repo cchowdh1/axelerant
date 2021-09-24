@@ -1,0 +1,21 @@
+gym.subscription_form:
+  path: 'trainee-subscription'
+  defaults:
+    _form: '\Drupal\gym_webservices\Form\GymPlanSubscription'
+    _title: 'Trainee Subscription'
+  requirements:
+    _permission: 'access all content'
+gym.user_autocomplete:
+  path: '/user-search/{type}'
+  defaults:
+    _controller: '\Drupal\gym_webservices\Controller\UserSearchAuto::userAutocomplete'
+    _format: json
+  requirements:
+    _access: 'TRUE'
+gym_common.admin_settings:
+  path: '/admin/config/gym-settings'
+  defaults:
+    _form: '\Drupal\gym_webservices\Form\CommonConfigurationForm'
+    _title: 'Heath World Common Configuration'
+  requirements:
+    _permission: 'administer site configuration'

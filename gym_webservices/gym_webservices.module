@@ -1,0 +1,154 @@
+<?php
+use Drupal\node\Entity\Node;
+
+function gym_webservices_entity_field_access($operation, \Drupal\Core\Field\FieldDefinitionInterface $field_definition, \Drupal\Core\Session\AccountInterface $account, \Drupal\Core\Field\FieldItemListInterface $items = NULL){
+    if ($field_definition->getName() == 'mail' && $operation == 'view'){
+        return \Drupal\Core\Access\AccessResult::allowedIfHasPermission($account, 'access private fields');
+    }
+    return \Drupal\Core\Access\AccessResult::neutral();
+}
+
+
+/**
+* Implements hook_mail().
+*/
+function gym_webservices_mail($key, &$message, $params) {
+ $options = array(
+   'langcode' => $message['langcode'],
+ );
+
+ switch ($key) {
+   case 'gym_forgot_password':
+     $message['from'] = \Drupal::config('system.site')->get('mail');
+     $message['subject'] = "Forgot Password";
+     $message['body'][] = $params['message'];
+     break;
+   case 'gym_subscription_expiry':
+     $message['from'] = \Drupal::config('system.site')->get('mail');
+     $message['subject'] = \Drupal::config('gym_webservices.settings')->get('subscription_expiry_notification.subject');
+     $message['body'][] = $params['message'];
+     break;
+ }
+}
+
+function gym_webservices_cron() {
+ 
+ $connection = \Drupal::database();
+ $query = $connection->select('users_field_data', 'ufd')
+  ->fields('ufd', ['uid']);
+ $query->join('user__roles', 'ur', 'ur.entity_id = ufd.uid');
+ $query->join('user__field_subscription_expiry', 'ex', 'ex.entity_id = ufd.uid');
+ $query->condition('ur.roles_target_id', 'member');
+ $query->condition('ufd.status', 1);
+ $query->condition('ex.field_subscription_expiry_value', date('Y-m-d'), '<');
+ $query->range(0, 100);
+ $output_query = $query->execute();
+ while ($final_data = $output_query->fetchObject()) {
+  $results[] = $final_data->uid;
+ }
+ //echo "<pre>"; print_r($results);exit;
+ $user_blocked = $connection->update('users_field_data')
+  ->fields([
+    'status' => 0
+  ])
+  ->condition('uid', $results, 'IN')
+  ->execute();
+ 
+ // Expiry Email Notification
+ 
+ //Query to excluded users from getting notification
+ $exclude_uid = $connection->select('node__field_user_to_notify', 'un')
+                       ->fields('un', ['field_user_to_notify_target_id']);
+ $exclude_uid->join('node__field_notification_end_date', 'ed', 'ed.entity_id = un.entity_id');
+ $exclude_uid->join('node__field_notification_type', 'nt', 'nt.entity_id = un.entity_id');			   
+ $exclude_uid->condition('ed.field_notification_end_date_value', date('Y-m-d'), '=');
+ $exclude_uid->condition('nt.field_notification_type_value', 'expiry', '=');
+ $uid_to_exclude = $exclude_uid->execute()->fetchAll();
+ $discard_uids = [];
+ 
+ foreach ($uid_to_exclude as $key => $value) {
+  $discard_uids[] = $value->field_user_to_notify_target_id;
+ }
+ 
+ $query_notification = $connection->select('user__field_subscription_expiry', 'usx')
+                       ->fields('usx', ['entity_id']);
+ $query_notification->join('users_field_data', 'u', 'u.uid = usx.entity_id');
+ $query_notification->join('user__field_first_name', 'fn', 'u.uid = fn.entity_id');
+ $query_notification->join('user__field_last_name', 'ln', 'u.uid = ln.entity_id');
+ $query_notification->fields('u', ['mail']);
+ $query_notification->fields('fn', ['field_first_name_value']);
+ $query_notification->fields('ln', ['field_last_name_value']);
+ $query_notification->addExpression("DATEDIFF(field_subscription_expiry_value, NOW())","remaining_days");
+ $query_notification->where("DATEDIFF(field_subscription_expiry_value, NOW()) BETWEEN 0 AND 6");
+ if(count($discard_uids) > 0 ) {
+  $query_notification->condition('usx.entity_id', $discard_uids, 'NOT IN');
+ }
+ $result_notification = $query_notification->execute();
+ while ($final_data = $result_notification->fetchObject()) {
+  $node_data = Node::create([
+   'type' => 'notification'
+  ]);
+  $node_data->set('field_notification_type','expiry');
+  $node_data->set('field_notification_end_date',date('Y-m-d'));
+  $node_data->set('field_notification_description',"Your Subscription will be expired in ".$final_data->remaining_days. "day(s)");
+  $node_data->set('field_user_to_notify',$final_data->entity_id);
+  $node_data->save();
+  
+  //email operation
+  $mailManager = \Drupal::service('plugin.manager.mail');
+  $module = 'gym_webservices';
+  $key = 'gym_subscription_expiry';
+  $to =  $final_data->mail;
+  
+  $params['message'] = str_replace(['@firstname','@lastname','@remainingdays'],[$final_data->field_first_name_value,$final_data->field_last_name_value,$final_data->remaining_days],\Drupal::config('gym_webservices.settings')->get('subscription_expiry_notification.mail_body'));
+  $langcode = \Drupal::currentUser()->getPreferredLangcode();
+  $send = true;
+
+  $mail_result = $mailManager->mail($module, $key, $to, $langcode, $params, NULL, $send);
+ }
+}
+
+
+function gym_webservices_form_alter(&$form, &$form_state, $form_id) {
+global $user;
+
+
+// Only alter forms with the necessary field
+if (isset($form['title']) && $form_id == 'views_exposed_form') {
+$view = $form_state->get('view');
+if($view->id() == 'user_plan') {
+	$query = \Drupal::entityQuery('node')
+			->condition('status', 1)
+			->condition('type', 'pricing');
+		
+	$nids = $query->execute();
+	$node_ids = [];
+	foreach($nids as $id => $nid) {
+	  $node_ids[] = $nid;
+	}
+
+	// Add a default so the filter is optional
+	$options = array('' => 'Please Select');
+
+	// // Buld the options array based on the query results, overwriting duplicate entries
+	$database = \Drupal::database();
+	$query = $database->select('node_field_data', 'n');
+	 
+	// Add extra detail to this query object: a condition, fields and a range.
+	$query->condition('n.nid', $node_ids, 'IN');
+	$query->fields('n', ['title','nid']);
+
+	$results = $query->execute()->fetchAll();
+
+	foreach($results as $id => $node) {
+	 $options[$node->title] = $node->title;
+	}
+
+
+	// // Alter the field
+	$form['title']['#type'] = 'select';
+	$form['title']['#options'] = $options;
+	$form['title']['#size'] = 1;
+}
+}}
+?>
